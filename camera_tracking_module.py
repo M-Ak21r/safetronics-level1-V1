@@ -6,13 +6,24 @@ import logging
 import threading
 import json
 import serial
+import sys
 
 # Import the other modules
 from face_recognition_module import FaceRecognition
 from data_storage_module import DataStorage
 
+# Configure logging with UTF-8 encoding
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('security_system.log', encoding='utf-8')
+    ]
+)
+
 class CameraTrackingSystem:
-    def __init__(self, serial_port='/dev/ttyUSB0', baud_rate=9600):
+    def __init__(self, serial_port='COM11', baud_rate=9600):
         self.logger = self.setup_logging()
         
         # Initialize modules
@@ -73,10 +84,11 @@ class CameraTrackingSystem:
             self.logger.warning(f"Unexpected error initializing serial: {e}. Running in simulation mode.")
             self.serial_connection = None
     
-    def _send_servo_angle(self, angle):
-        """Send servo angle to Arduino via serial connection.
+    def _send_servo_command(self, servo_num, angle):
+        """Send servo command to Arduino via serial connection.
         
         Args:
+            servo_num: Servo number (1 for door lock, 2 for pan/tracking)
             angle: Integer value between 0 and 180 degrees.
         
         Returns:
@@ -86,22 +98,22 @@ class CameraTrackingSystem:
         angle = max(0, min(180, int(angle)))
         
         if self.serial_connection is None:
-            self.logger.debug(f"Serial not connected. Simulated servo angle: {angle}°")
+            self.logger.debug(f"Serial not connected. Simulated servo {servo_num} angle: {angle}°")
             return False
         
         try:
-            # Send angle as string followed by newline
-            command = f"{angle}\n"
+            # Send command in format "S1,angle\n" or "S2,angle\n"
+            command = f"S{servo_num},{angle}\n"
             self.serial_connection.write(command.encode('utf-8'))
             self.serial_connection.flush()
-            self.logger.debug(f"Sent servo angle: {angle}° to Arduino")
+            self.logger.debug(f"Sent command: {command.strip()} to Arduino")
             return True
         except serial.SerialException as e:
             self.logger.error(f"Serial communication error: {e}")
             self._handle_serial_disconnect()
             return False
         except Exception as e:
-            self.logger.error(f"Error sending servo angle: {e}")
+            self.logger.error(f"Error sending servo command: {e}")
             return False
     
     def _handle_serial_disconnect(self):
@@ -156,14 +168,16 @@ class CameraTrackingSystem:
             return False
     
     def control_servo1(self, unlock=True):
-        """Control door lock servo"""
+        """Control door lock servo (Servo 1)"""
         try:
             angle = 90 if unlock else 0
             self.servo1_position = angle
             
-            # Simulate servo movement (replace with actual GPIO code)
+            # Send command to Arduino for Servo 1
+            self._send_servo_command(1, angle)
+            
             if unlock:
-                self.logger.info("🚪 DOOR UNLOCKED - Servo 1 rotated 90°")
+                self.logger.info("DOOR UNLOCKED - Servo 1 rotated 90°")
                 self.data_storage.log_security_event(
                     "DOOR_UNLOCKED", 
                     "owner", 
@@ -172,7 +186,7 @@ class CameraTrackingSystem:
                     "Door unlocked via face recognition"
                 )
             else:
-                self.logger.info("🚪 DOOR LOCKED - Servo 1 rotated 0°")
+                self.logger.info("DOOR LOCKED - Servo 1 rotated 0°")
                 self.data_storage.log_security_event(
                     "DOOR_LOCKED", 
                     "system", 
@@ -189,7 +203,7 @@ class CameraTrackingSystem:
             return False
     
     def control_servo2(self, angle):
-        """Control tracking servo by sending pan angle to Arduino.
+        """Control tracking servo (Servo 2) by sending pan angle to Arduino.
         
         Args:
             angle: Integer value between 0 and 180 degrees for pan position.
@@ -203,10 +217,10 @@ class CameraTrackingSystem:
             angle = max(0, min(180, int(angle)))
             self.servo2_position = angle
             
-            # Send angle to Arduino via serial
-            self._send_servo_angle(angle)
+            # Send command to Arduino for Servo 2
+            self._send_servo_command(2, angle)
             
-            self.logger.info(f"🎯 Tracking servo moved to {angle}°")
+            self.logger.info(f"Tracking servo moved to {angle}°")
             
             # Log tracking activity
             self.data_storage.log_security_event(

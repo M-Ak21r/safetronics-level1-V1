@@ -2,33 +2,39 @@
  * arduino_servo_controller.ino
  * 
  * Arduino sketch for receiving servo angle commands from a PC via Serial
- * and controlling a pan servo for the safetronics security system.
+ * and controlling two servos for the safetronics security system.
  * 
  * Hardware connections:
- * - Servo signal wire -> Pin 9
- * - Servo power -> 5V (or external power for larger servos)
- * - Servo ground -> GND
+ * - Servo 1 (Door Lock) signal wire -> Pin 10
+ * - Servo 2 (Pan/Tracking) signal wire -> Pin 9
+ * - Both servos power -> 5V (or external power for larger servos)
+ * - Both servos ground -> GND
  * 
  * Serial protocol:
- * - Receives integer values 0-180 as ASCII string followed by newline
- * - Example: "90\n" sets servo to 90 degrees (center position)
+ * - Format: "S1,angle\n" or "S2,angle\n"
+ * - Example: "S1,90\n" sets servo 1 (door lock) to 90 degrees (unlocked)
+ * - Example: "S2,0\n" sets servo 2 (tracking) to 0 degrees
+ * - Single number "90\n" controls servo 2 (backward compatible)
  */
 
 #include <Servo.h>
 
 // Pin definitions
-const int SERVO_PIN = 9;
+const int SERVO1_PIN = 10;  // Door lock servo
+const int SERVO2_PIN = 9;   // Pan/tracking servo
 
-// Servo object
-Servo panServo;
+// Servo objects
+Servo doorLockServo;  // Servo 1
+Servo panServo;       // Servo 2
 
 // Buffer for incoming serial data
 const int BUFFER_SIZE = 8;
 char inputBuffer[BUFFER_SIZE];
 int bufferIndex = 0;
 
-// Current servo position
-int currentAngle = 90;
+// Current servo positions
+int servo1Angle = 0;   // Door lock starts locked (0 degrees)
+int servo2Angle = 90;  // Pan servo starts centered (90 degrees)
 
 // Timing for non-blocking operations
 unsigned long lastUpdateTime = 0;
@@ -38,17 +44,21 @@ void setup() {
     // Initialize serial communication at 9600 baud
     Serial.begin(9600);
     
-    // Attach servo to pin
-    panServo.attach(SERVO_PIN);
+    // Attach servos to pins
+    doorLockServo.attach(SERVO1_PIN);
+    panServo.attach(SERVO2_PIN);
     
-    // Set initial position to center
-    panServo.write(currentAngle);
+    // Set initial positions
+    doorLockServo.write(servo1Angle);  // Door locked
+    panServo.write(servo2Angle);        // Camera centered
     
     // Clear input buffer
     memset(inputBuffer, 0, BUFFER_SIZE);
     
     // Send ready signal
     Serial.println("SERVO_READY");
+    Serial.println("S1:LOCKED(0)");
+    Serial.println("S2:CENTER(90)");
 }
 
 void loop() {
@@ -88,22 +98,42 @@ void readSerial() {
 }
 
 void processCommand(const char* command) {
-    // Parse integer value from command
-    int angle = atoi(command);
-    
-    // Validate angle range (0-180 degrees)
-    if (angle >= 0 && angle <= 180) {
-        currentAngle = angle;
+    // Check if command format is "S1,angle" or "S2,angle"
+    if (command[0] == 'S' && (command[1] == '1' || command[1] == '2') && command[2] == ',') {
+        // Parse servo number and angle
+        int servoNum = command[1] - '0';  // Convert '1' or '2' to 1 or 2
+        int angle = atoi(&command[3]);    // Parse angle after "S1," or "S2,"
         
-        // Immediately update servo position
-        panServo.write(currentAngle);
-        
-        // Send acknowledgment
-        Serial.print("ACK:");
-        Serial.println(currentAngle);
+        // Validate angle range (0-180 degrees)
+        if (angle >= 0 && angle <= 180) {
+            if (servoNum == 1) {
+                // Control door lock servo
+                servo1Angle = angle;
+                doorLockServo.write(servo1Angle);
+                Serial.print("ACK:S1:");
+                Serial.println(servo1Angle);
+            } else if (servoNum == 2) {
+                // Control pan/tracking servo
+                servo2Angle = angle;
+                panServo.write(servo2Angle);
+                Serial.print("ACK:S2:");
+                Serial.println(servo2Angle);
+            }
+        } else {
+            Serial.println("ERR:INVALID_ANGLE");
+        }
     } else {
-        // Invalid angle, send error
-        Serial.println("ERR:INVALID_ANGLE");
+        // Backward compatibility: single number controls servo 2 (pan)
+        int angle = atoi(command);
+        
+        if (angle >= 0 && angle <= 180) {
+            servo2Angle = angle;
+            panServo.write(servo2Angle);
+            Serial.print("ACK:S2:");
+            Serial.println(servo2Angle);
+        } else {
+            Serial.println("ERR:INVALID_ANGLE");
+        }
     }
 }
 
