@@ -355,6 +355,11 @@ class CameraTrackingSystem:
         Returns:
             int: The calculated pan angle sent to the servo.
         """
+        # Tracking constants
+        MAX_CORRECTION_ANGLE = 45.0  # Maximum angle adjustment per frame (degrees)
+        TRACKING_DEAD_ZONE_PIXELS = 20  # Pixel threshold to prevent servo jitter
+        DIRECTION_DISPLAY_THRESHOLD = 50  # Pixel threshold for UI direction display
+        
         try:
             x, y, w, h = face_bbox
             frame_h, frame_w = frame.shape[:2]
@@ -372,9 +377,11 @@ class CameraTrackingSystem:
             # Map error to angle: negative error = face is left, need to pan left (decrease angle)
             # Servo range: 0-180, center at 90
             # Scale factor: convert pixel error to angle adjustment
-            # Max error is half frame width (320px) -> max correction ~45 degrees
-            scale_factor = 45.0 / (frame_w / 2)  # ~0.14 degrees per pixel
-            angle_correction = -error_x * scale_factor  # Negate because servo direction
+            # Max error is half frame width (320px) -> max correction of MAX_CORRECTION_ANGLE degrees
+            scale_factor = MAX_CORRECTION_ANGLE / (frame_w / 2)  # ~0.14 degrees per pixel
+            # Negate because positive error (face to right of center) requires
+            # decreasing servo angle to pan camera right and bring face to center
+            angle_correction = -error_x * scale_factor
             
             # Calculate new servo angle
             new_angle = self.servo2_position + angle_correction
@@ -383,15 +390,15 @@ class CameraTrackingSystem:
             new_angle = max(0, min(180, int(new_angle)))
             
             # Determine direction for display purposes
-            if error_x < -50:
+            if error_x < -DIRECTION_DISPLAY_THRESHOLD:
                 direction = "LEFT"
-            elif error_x > 50:
+            elif error_x > DIRECTION_DISPLAY_THRESHOLD:
                 direction = "RIGHT"
             else:
                 direction = "CENTER"
             
-            # Only send command if there's significant correction needed
-            if abs(error_x) > 20:  # Dead zone to prevent jitter
+            # Only send command if there's significant correction needed (dead zone to prevent jitter)
+            if abs(error_x) > TRACKING_DEAD_ZONE_PIXELS:
                 self.control_servo2(new_angle)
             
             # Draw tracking info
