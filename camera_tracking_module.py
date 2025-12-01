@@ -5,13 +5,25 @@ from datetime import datetime, timedelta
 import logging
 import threading
 import json
+import serial
+import sys
 
 # Import the other modules
 from face_recognition_module import FaceRecognition
 from data_storage_module import DataStorage
 
+# Configure logging with UTF-8 encoding
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('security_system.log', encoding='utf-8')
+    ]
+)
+
 class CameraTrackingSystem:
-    def __init__(self):
+    def __init__(self, serial_port='COM11', baud_rate=9600):
         self.logger = self.setup_logging()
         
         # Initialize modules
@@ -35,9 +47,15 @@ class CameraTrackingSystem:
         self.owner_detected_time = None
         self.last_alert_time = None
         
-        # Servo control simulation (replace with actual GPIO)
+        # Servo control
         self.servo1_position = 0  # 0=locked, 90=unlocked
-        self.servo2_position = 90  # 90=center
+        self.servo2_position = 90  # 90=center (pan servo)
+        
+        # Serial connection for Arduino
+        self.serial_port = serial_port
+        self.baud_rate = baud_rate
+        self.serial_connection = None
+        self._init_serial_connection()
         
         # Motion detection
         self.previous_frame = None
@@ -47,6 +65,68 @@ class CameraTrackingSystem:
         self.alert_cooldown = 60  # seconds
         
         self.logger.info("Camera Tracking System initialized")
+    
+    def _init_serial_connection(self):
+        """Initialize serial connection to Arduino with error handling."""
+        try:
+            self.serial_connection = serial.Serial(
+                port=self.serial_port,
+                baudrate=self.baud_rate,
+                timeout=1
+            )
+            # Allow Arduino to reset after serial connection
+            time.sleep(2)
+            self.logger.info(f"Serial connection established on {self.serial_port} at {self.baud_rate} baud")
+        except serial.SerialException as e:
+            self.logger.warning(f"Could not establish serial connection: {e}. Running in simulation mode.")
+            self.serial_connection = None
+        except Exception as e:
+            self.logger.warning(f"Unexpected error initializing serial: {e}. Running in simulation mode.")
+            self.serial_connection = None
+    
+    def _send_servo_command(self, servo_num, angle):
+        """Send servo command to Arduino via serial connection.
+        
+        Args:
+            servo_num: Servo number (1 for door lock, 2 for pan/tracking)
+            angle: Integer value between 0 and 180 degrees.
+        
+        Returns:
+            bool: True if successful, False otherwise.
+        """
+        # Clamp angle to valid range
+        angle = max(0, min(180, int(angle)))
+        
+        if self.serial_connection is None:
+            self.logger.debug(f"Serial not connected. Simulated servo {servo_num} angle: {angle}°")
+            return False
+        
+        try:
+            # Send command in format "S1,angle\n" or "S2,angle\n"
+            command = f"S{servo_num},{angle}\n"
+            self.serial_connection.write(command.encode('utf-8'))
+            self.serial_connection.flush()
+            self.logger.debug(f"Sent command: {command.strip()} to Arduino")
+            return True
+        except serial.SerialException as e:
+            self.logger.error(f"Serial communication error: {e}")
+            self._handle_serial_disconnect()
+            return False
+        except Exception as e:
+            self.logger.error(f"Error sending servo command: {e}")
+            return False
+    
+    def _handle_serial_disconnect(self):
+        """Handle serial disconnection gracefully."""
+        self.logger.warning("Serial connection lost. Attempting to reconnect...")
+        if self.serial_connection is not None:
+            try:
+                self.serial_connection.close()
+            except Exception:
+                pass
+        self.serial_connection = None
+        # Try to reconnect
+        self._init_serial_connection()
     
     def setup_logging(self):
         """Setup logging for camera tracking"""
@@ -88,14 +168,16 @@ class CameraTrackingSystem:
             return False
     
     def control_servo1(self, unlock=True):
-        """Control door lock servo"""
+        """Control door lock servo (Servo 1)"""
         try:
             angle = 90 if unlock else 0
             self.servo1_position = angle
             
-            # Simulate servo movement (replace with actual GPIO code)
+            # Send command to Arduino for Servo 1
+            self._send_servo_command(1, angle)
+            
             if unlock:
-                self.logger.info("🚪 DOOR UNLOCKED - Servo 1 rotated 90°")
+                self.logger.info("DOOR UNLOCKED - Servo 1 rotated 90°")
                 self.data_storage.log_security_event(
                     "DOOR_UNLOCKED", 
                     "owner", 
@@ -104,7 +186,7 @@ class CameraTrackingSystem:
                     "Door unlocked via face recognition"
                 )
             else:
-                self.logger.info("🚪 DOOR LOCKED - Servo 1 rotated 0°")
+                self.logger.info("DOOR LOCKED - Servo 1 rotated 0°")
                 self.data_storage.log_security_event(
                     "DOOR_LOCKED", 
                     "system", 
@@ -120,21 +202,25 @@ class CameraTrackingSystem:
             self.logger.error(f"Error controlling servo 1: {e}")
             return False
     
-    def control_servo2(self, direction):
-        """Control tracking servo based on movement direction"""
+    def control_servo2(self, angle):
+        """Control tracking servo (Servo 2) by sending pan angle to Arduino.
+        
+        Args:
+            angle: Integer value between 0 and 180 degrees for pan position.
+                   90 is center, 0 is full left, 180 is full right.
+        
+        Returns:
+            bool: True if successful, False otherwise.
+        """
         try:
-            angles = {
-                "left": 45,
-                "right": 135,
-                "up": 70,
-                "down": 110,
-                "center": 90
-            }
-            
-            angle = angles.get(direction, 90)
+            # Clamp angle to valid range
+            angle = max(0, min(180, int(angle)))
             self.servo2_position = angle
             
-            self.logger.info(f"🎯 Tracking servo moved {direction} to {angle}°")
+            # Send command to Arduino for Servo 2
+            self._send_servo_command(2, angle)
+            
+            self.logger.info(f"Tracking servo moved to {angle}°")
             
             # Log tracking activity
             self.data_storage.log_security_event(
@@ -142,7 +228,7 @@ class CameraTrackingSystem:
                 "unknown",
                 0,
                 "front_door",
-                f"Tracking servo moved {direction} to follow unknown person"
+                f"Tracking servo moved to {angle}° to follow unknown person"
             )
             
             return True
@@ -271,40 +357,73 @@ class CameraTrackingSystem:
             self.logger.error(f"Error activating relay: {e}")
     
     def track_unknown_person(self, frame, face_bbox):
-        """Track unknown person and adjust camera/servo"""
+        """Track unknown person and adjust camera/servo to center face in X-axis.
+        
+        Implements closed-loop tracking by calculating the pan angle required
+        to center the detected face in the frame and sending it to the Arduino.
+        
+        Args:
+            frame: The current video frame.
+            face_bbox: Tuple (x, y, w, h) of the detected face bounding box.
+        
+        Returns:
+            int: The calculated pan angle sent to the servo.
+        """
+        # Tracking constants
+        MAX_CORRECTION_ANGLE = 45.0  # Maximum angle adjustment per frame (degrees)
+        TRACKING_DEAD_ZONE_PIXELS = 20  # Pixel threshold to prevent servo jitter
+        DIRECTION_DISPLAY_THRESHOLD = 50  # Pixel threshold for UI direction display
+        
         try:
             x, y, w, h = face_bbox
             frame_h, frame_w = frame.shape[:2]
             
-            # Calculate face center
-            face_center_x = x + w/2
-            face_center_y = y + h/2
+            # Calculate face center X coordinate
+            face_center_x = x + w / 2
             
-            # Determine if person is moving out of frame
-            if face_center_x < frame_w * 0.2:
-                direction = "right"
-            elif face_center_x > frame_w * 0.8:
-                direction = "left"
-            elif face_center_y < frame_h * 0.2:
-                direction = "down"
-            elif face_center_y > frame_h * 0.8:
-                direction = "up"
+            # Calculate frame center
+            frame_center_x = frame_w / 2  # 320 for 640px width
+            
+            # Calculate error (how far face is from center)
+            error_x = face_center_x - frame_center_x
+            
+            # Calculate pan angle correction
+            # Map error to angle: negative error = face is left, need to pan left (decrease angle)
+            # Servo range: 0-180, center at 90
+            # Scale factor: convert pixel error to angle adjustment
+            # Max error is half frame width (320px) -> max correction of MAX_CORRECTION_ANGLE degrees
+            scale_factor = MAX_CORRECTION_ANGLE / (frame_w / 2)  # ~0.14 degrees per pixel
+            # Negate because positive error (face to right of center) requires
+            # decreasing servo angle to pan camera right and bring face to center
+            angle_correction = -error_x * scale_factor
+            
+            # Calculate new servo angle
+            new_angle = self.servo2_position + angle_correction
+            
+            # Clamp to valid servo range
+            new_angle = max(0, min(180, int(new_angle)))
+            
+            # Determine direction for display purposes
+            if error_x < -DIRECTION_DISPLAY_THRESHOLD:
+                direction = "LEFT"
+            elif error_x > DIRECTION_DISPLAY_THRESHOLD:
+                direction = "RIGHT"
             else:
-                direction = "center"
+                direction = "CENTER"
             
-            # Only move servo if person is near edge
-            if direction != "center":
-                self.control_servo2(direction)
+            # Only send command if there's significant correction needed (dead zone to prevent jitter)
+            if abs(error_x) > TRACKING_DEAD_ZONE_PIXELS:
+                self.control_servo2(new_angle)
             
             # Draw tracking info
-            cv2.putText(frame, f"TRACKING: {direction.upper()}", 
+            cv2.putText(frame, f"TRACKING: {direction} | Angle: {new_angle}°", 
                        (10, frame_h - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
             
-            return direction
+            return new_angle
             
         except Exception as e:
             self.logger.error(f"Error in person tracking: {e}")
-            return "center"
+            return self.servo2_position
     
     def run_security_system(self):
         """Main security system loop"""
@@ -354,7 +473,7 @@ class CameraTrackingSystem:
                 elif self.tracking_unknown and not unknown_faces:
                     if time.time() - self.unknown_person_detected_time > 5:  # 5 seconds no detection
                         self.tracking_unknown = False
-                        self.control_servo2("center")  # Reset tracking servo
+                        self.control_servo2(90)  # Reset tracking servo to center
                 
                 # Detect suspicious activity
                 suspicious_detected = self.detect_suspicious_activity(frame)
@@ -436,6 +555,15 @@ class CameraTrackingSystem:
                 self.cap.release()
             
             cv2.destroyAllWindows()
+            
+            # Close serial connection
+            if self.serial_connection is not None:
+                try:
+                    self.serial_connection.close()
+                    self.logger.info("Serial connection closed")
+                except Exception as e:
+                    self.logger.warning(f"Error closing serial connection: {e}")
+                self.serial_connection = None
             
             # Ensure door is locked on exit
             if self.door_unlocked:
